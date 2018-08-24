@@ -2824,6 +2824,11 @@ UInt dis_Grp3 ( UChar sorb, Bool locked, Int sz, Int delta, Bool* decode_OK )
 
    if (epartIsReg(modrm)) {
       switch (gregOfRM(modrm)) {
+         case 1: /* Undocumented synonym of 1 */
+           /* The Intel docs imply this insn is undefined and binutils
+              agrees.  Unfortunately Core 2 will run it (with who
+              knows what result?)  sandpile.org reckons it's an alias
+              for case 0.  We live dangerously. */
          case 0: { /* TEST */
             delta++; d32 = getUDisp(sz, delta); delta += sz;
             dst1 = newTemp(ty);
@@ -2835,13 +2840,6 @@ UInt dis_Grp3 ( UChar sorb, Bool locked, Int sz, Int delta, Bool* decode_OK )
                                       nameIReg(sz, eregOfRM(modrm)));
             break;
          }
-         case 1: /* UNDEFINED */
-           /* The Intel docs imply this insn is undefined and binutils
-              agrees.  Unfortunately Core 2 will run it (with who
-              knows what result?)  sandpile.org reckons it's an alias
-              for case 0.  We play safe. */
-           *decode_OK = False;
-           break;
          case 2: /* NOT */
             delta++;
             putIReg(sz, eregOfRM(modrm),
@@ -2895,6 +2893,8 @@ UInt dis_Grp3 ( UChar sorb, Bool locked, Int sz, Int delta, Bool* decode_OK )
       delta += len;
       assign(t1, loadLE(ty,mkexpr(addr)));
       switch (gregOfRM(modrm)) {
+         case 1: /* Undocumented synonym of 1 */
+           /* See comment above on R case */
          case 0: { /* TEST */
             d32 = getUDisp(sz, delta); delta += sz;
             dst1 = newTemp(ty);
@@ -2904,10 +2904,6 @@ UInt dis_Grp3 ( UChar sorb, Bool locked, Int sz, Int delta, Bool* decode_OK )
             DIP("test%c $0x%x, %s\n", nameISize(sz), d32, dis_buf);
             break;
          }
-         case 1: /* UNDEFINED */
-           /* See comment above on R case */
-           *decode_OK = False;
-           break;
          case 2: /* NOT */
             dst1 = newTemp(ty);
             assign(dst1, unop(mkSizedOp(ty,Iop_Not8), mkexpr(t1)));
@@ -6247,7 +6243,6 @@ UInt dis_SHLRD_Gv_Ev ( UChar sorb,
       mkpair   = Iop_32HLto64;
       getres   = left_shift ? Iop_64HIto32 : Iop_64to32;
       shift    = left_shift ? Iop_Shl64 : Iop_Shr64;
-      mask     = mkU8(31);
    } else {
       /* sz == 2 */
       tmpL     = newTemp(Ity_I32);
@@ -6256,8 +6251,15 @@ UInt dis_SHLRD_Gv_Ev ( UChar sorb,
       mkpair   = Iop_16HLto32;
       getres   = left_shift ? Iop_32HIto16 : Iop_32to16;
       shift    = left_shift ? Iop_Shl32 : Iop_Shr32;
-      mask     = mkU8(15);
    }
+
+   /* Note that we keep 5 bits of the shift amount even for 16-bit
+      operands. The manual says the result is undefined when the
+      shift amount is greater than the operand size, but that means
+      we still need to handle the case of shift_amt = 16 for 16-bit
+      operands. Luckily because we're doing the shift at double width,
+      this is compatible with the primops' restrictions. */
+   mask     = mkU8(31);
 
    /* Do the shift, calculate the subshift value, and set 
       the flag thunk. */
@@ -7626,7 +7628,8 @@ static IRExpr* mk64from16s ( IRTemp t3, IRTemp t2,
 
 /* Generate IR to set the guest %EFLAGS from the pushfl-format image
    in the given 32-bit temporary.  The flags that are set are: O S Z A
-   C P D ID AC.
+   C P D ID AC, except that ID and AC are not set if this was a 16-bit
+   popw.
 
    In all cases, code to set AC is generated.  However, VEX actually
    ignores the AC value and so can optionally emit an emulation
@@ -7640,9 +7643,11 @@ static IRExpr* mk64from16s ( IRTemp t3, IRTemp t2,
 static 
 void set_EFLAGS_from_value ( IRTemp t1, 
                              Bool   emit_AC_emwarn,
+			     Int    sz,
                              Addr32 next_insn_EIP )
 {
    vassert(typeOfIRTemp(irsb->tyenv,t1) == Ity_I32);
+   vassert(sz == 2 || sz == 4);
 
    /* t1 is the flag word.  Mask out everything except OSZACP and set
       the flags thunk to X86G_CC_OP_COPY. */
@@ -7674,6 +7679,7 @@ void set_EFLAGS_from_value ( IRTemp t1,
                mkU32(1)))
        );
 
+   if (sz > 2) {
    /* Set the ID flag */
    stmt( IRStmt_Put( 
             OFFB_IDFLAG,
@@ -7711,6 +7717,7 @@ void set_EFLAGS_from_value ( IRTemp t1,
             OFFB_EIP
          )
       );
+   }
    }
 }
 
@@ -13102,6 +13109,7 @@ DisResult disInstr_X86_WRK (
          of iret.  All it really does is: 
             popl %EIP; popl %CS; popl %EFLAGS.
          %CS is set but ignored (as it is in (eg) popw %cs)". */
+      if (sz != 4) goto decode_failure; /* iretw is not yet supported */
       t1 = newTemp(Ity_I32); /* ESP */
       t2 = newTemp(Ity_I32); /* new EIP */
       t3 = newTemp(Ity_I32); /* new CS */
@@ -13115,7 +13123,8 @@ DisResult disInstr_X86_WRK (
       /* set %CS (which is ignored anyway) */
       putSReg( R_CS, unop(Iop_32to16, mkexpr(t3)) );
       /* set %EFLAGS */
-      set_EFLAGS_from_value( t4, False/*!emit_AC_emwarn*/, 0/*unused*/ );
+      set_EFLAGS_from_value( t4, False/*!emit_AC_emwarn*/, 4/*sz*/,
+			     0/*unused*/ );
       /* goto new EIP value */
       jmp_treg(&dres, Ijk_Ret, t2);
       vassert(dres.whatNext == Dis_StopHere);
@@ -13123,6 +13132,7 @@ DisResult disInstr_X86_WRK (
       break;
 
    case 0xE8: /* CALL J4 */
+      if (sz != 4) goto decode_failure;
       d32 = getUDisp32(delta); delta += 4;
       d32 += (guest_EIP_bbstart+delta); 
       /* (guest_eip_bbstart+delta) == return-to addr, d32 == call-to addr */
@@ -13976,7 +13986,7 @@ DisResult disInstr_X86_WRK (
 
       /* Generate IR to set %EFLAGS{O,S,Z,A,C,P,D,ID,AC} from the
 	 value in t1. */
-      set_EFLAGS_from_value( t1, True/*emit_AC_emwarn*/,
+      set_EFLAGS_from_value( t1, True/*emit_AC_emwarn*/, sz,
                                  ((Addr32)guest_EIP_bbstart)+delta );
 
       DIP("popf%c\n", nameISize(sz));
