@@ -64,7 +64,7 @@ static UInt  mymalloc_used = 0;
 void* mymalloc ( Int n )
 {
    void* p;
-#if defined(__powerpc64__) || defined(__aarch64__)
+#if defined(__powerpc64__) || defined(__aarch64__) || defined(__x86_64__)
    while ((ULong)(mymalloc_area+mymalloc_used) & 0xFFF)
 #else
    while ((UInt)(mymalloc_area+mymalloc_used) & 0xFFF)

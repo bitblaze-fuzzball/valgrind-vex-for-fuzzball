@@ -62,6 +62,14 @@ static Int   n_translations_made = 0;
 #  define GuestPC                   guest_PC
 #  define CacheLineSize             0/*irrelevant*/
 
+#elif defined(__x86_64__)
+#  define VexGuestState             VexGuestAMD64State
+#  define LibVEX_Guest_initialise   LibVEX_GuestAMD64_initialise
+#  define VexArch                   VexArchAMD64
+#  define VexSubArch                VexSubArch_NONE
+#  define GuestPC                   guest_RIP
+#  define CacheLineSize             0/*irrelevant*/
+
 #else
 #   error "Unknown arch"
 #endif
@@ -106,11 +114,13 @@ ULong*          trans_tableP[N_TRANS_TABLE];
 Int trans_cache_used = 0;
 Int trans_table_used = 0;
 
-static Bool chase_into_ok ( void* opaque, Addr64 dst ) {
+static Bool chase_into_ok ( void* opaque, Addr dst ) {
    return False;
 }
 
-static UInt needs_self_check ( void* opaque, const VexGuestExtents* vge ) {
+static UInt needs_self_check ( void* opaque,
+			       VexRegisterUpdates* pxControl,
+			       const VexGuestExtents* vge ) {
    return 0;
 }
 
@@ -140,6 +150,7 @@ static HWord serviceFn ( HWord arg1, HWord arg2 )
 }
 
 
+#if defined(__aarch64__)
 // needed for arm64 ?
 static void invalidate_icache(void *ptr, unsigned long nbytes)
 {
@@ -258,6 +269,7 @@ static void invalidate_icache(void *ptr, unsigned long nbytes)
    );
 
 }
+#endif
 
 
 /* -------------------- */
@@ -288,6 +300,34 @@ void switchback ( void )
 {
    sb_helper1 = (HWord)&gst;
    sb_helper2 = LibVEX_GuestX86_get_eflags(&gst);
+   switchback_asm(); // never returns
+}
+
+#elif defined(__x86_64__)
+
+extern void switchback_asm(void);
+asm(
+"switchback_asm:\n"
+"   mov sb_helper1, %rax\n"  // eax = guest state ptr
+"   mov  16(%rax), %rsp\n"   // switch stacks
+"   push 56(%rax)\n"         // push continuation addr
+"   mov sb_helper2, %rbx\n"  // get eflags
+"   push %rbx\n"             // eflags:CA
+"   push 0(%rax)\n"          //  EAX:eflags:CA
+"   mov 8(%rax), %rcx\n" 
+"   mov 16(%rax), %rdx\n" 
+"   mov 24(%rax), %rbx\n" 
+"   mov 32(%rax), %rbp\n"
+"   mov 40(%rax), %rsi\n"
+"   mov 48(%rax), %rdi\n"
+"   pop %rax\n"
+"   popf\n"
+"   ret\n"
+);
+void switchback ( void )
+{
+   sb_helper1 = (HWord)&gst;
+   sb_helper2 = LibVEX_GuestAMD64_get_rflags(&gst);
    switchback_asm(); // never returns
 }
 
@@ -452,6 +492,7 @@ void switchback ( void )
 // gp   holds the guest state pointer to use
 // res  is to hold the result.  Or some such.
 static HWord block[2]; // f, gp;
+HWord f, gp, res;
 extern HWord run_translation_asm(void);
 
 extern void disp_chain_assisted(void);
@@ -498,6 +539,19 @@ asm(
 "   popal\n"
 "   ret\n"
 );
+
+#elif defined(__x86_64__)
+
+asm(
+"run_translation_asm:\n"
+"   mov gp, %rbp\n"
+"   mov f, %rax\n"
+"   call *%rax\n"
+"   mov %rax, res\n"
+"   ret\n"
+);
+
+void disp_chain_assisted(void) { abort(); }
 
 #else
 # error "Unknown arch"
@@ -578,6 +632,9 @@ void make_translation ( Addr guest_addr, Bool verbose )
    LibVEX_default_VexArchInfo(&vex_archinfo);
    //vex_archinfo.subarch = VexSubArch;
    //vex_archinfo.ppc_icache_line_szB = CacheLineSize;
+#ifdef __x86_64__
+   vex_archinfo.endness = VexEndnessLE;
+#endif
 
    /* */
    vta.arch_guest       = VexArch;
@@ -659,7 +716,7 @@ void failure_exit ( void )
 }
 
 static
-void log_bytes ( HChar* bytes, Int nbytes )
+void log_bytes ( const HChar* bytes, SizeT nbytes )
 {
    fwrite ( bytes, 1, nbytes, stdout );
    fflush ( stdout );
@@ -689,6 +746,14 @@ static void run_simulator ( void )
             gst.guest_EAX = serviceFn( *(UInt*)(esp+4), *(UInt*)(esp+8) );
             gst.guest_ESP = esp+4;
             next_guest = gst.guest_EIP;
+         }
+#        elif defined(__x86_64__)
+         {
+            HWord rsp = gst.guest_RSP;
+            gst.guest_RIP = *(ULong*)(rsp+0);
+            gst.guest_RAX = serviceFn( *(ULong*)(rsp+8), *(ULong*)(rsp+16) );
+            gst.guest_RSP = rsp+8;
+            next_guest = gst.guest_RIP;
          }
 #        elif defined(__aarch64__)
          {
@@ -780,6 +845,12 @@ int main ( Int argc, HChar** argv )
    gst.guest_ESP = (UInt)&gstack[32000];
    *(UInt*)(gst.guest_ESP+4) = (UInt)serviceFn;
    *(UInt*)(gst.guest_ESP+0) = 0x12345678;
+
+#  elif defined(__x86_64__)
+   gst.guest_RIP = (ULong)entryP;
+   gst.guest_RSP = (ULong)&gstack[32000];
+   *(ULong*)(gst.guest_RSP+8) = (ULong)serviceFn;
+   *(ULong*)(gst.guest_RSP+0) = 0x12345678;
 
 #  elif defined(__aarch64__)
    gst.guest_PC = (ULong)entryP;
