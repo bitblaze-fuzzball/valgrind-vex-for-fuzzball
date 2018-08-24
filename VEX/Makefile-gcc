@@ -43,7 +43,7 @@ LIB_OBJS = 	priv/ir_defs.o                          \
 		priv/ir_match.o			        \
 		priv/ir_opt.o				\
 		priv/ir_inject.o			\
-		priv/main_main.o			\
+		priv/multiarch_main_main.o		\
 		priv/main_globals.o			\
 		priv/main_util.o			\
 		priv/s390_disasm.o			\
@@ -117,10 +117,6 @@ CCFLAGS = -Wall -Wmissing-prototypes -Wstrict-prototypes -Wshadow \
 # 188: enumerated type mixed with another type
 # (the above are for icc 8.0 -- 8.0.0.55 I think)
 # 186: pointless comparison of unsigned integer with zero
-
-# kludge: stops V biarch builds screwing up at -j 2 or above
-# The Right fix is to autoconf/automake-ise vex.
-.NOTPARALLEL:
 
 all: vex
 
@@ -252,6 +248,10 @@ priv/ir_match.o: $(ALL_HEADERS) priv/ir_match.c
 priv/ir_opt.o: $(ALL_HEADERS) priv/ir_opt.c
 	$(CC) $(CCFLAGS) $(ALL_INCLUDES) -o priv/ir_opt.o \
 					 -c priv/ir_opt.c
+
+priv/multiarch_main_main.o: $(ALL_HEADERS) priv/multiarch_main_main.c
+	$(CC) $(CCFLAGS) $(ALL_INCLUDES) -o priv/multiarch_main_main.o \
+					 -c priv/multiarch_main_main.c
 
 priv/main_main.o: $(ALL_HEADERS) priv/main_main.c
 	$(CC) $(CCFLAGS) $(ALL_INCLUDES) -o priv/main_main.o \
