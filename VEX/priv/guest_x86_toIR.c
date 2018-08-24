@@ -13127,7 +13127,8 @@ DisResult disInstr_X86_WRK (
       d32 += (guest_EIP_bbstart+delta); 
       /* (guest_eip_bbstart+delta) == return-to addr, d32 == call-to addr */
       if (d32 == guest_EIP_bbstart+delta && getIByte(delta) >= 0x58 
-                                         && getIByte(delta) <= 0x5F) {
+                                         && getIByte(delta) <= 0x5F
+	  && resteerOkFn( callback_opaque, (Addr64)(Addr32)d32 )) {
          /* Specially treat the position-independent-code idiom 
                  call X
               X: popl %reg
