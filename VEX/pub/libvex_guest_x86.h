@@ -187,18 +187,22 @@ typedef
       U128  guest_XMM7;
 
       /* Segment registers. */
-      UShort guest_CS;
+      UShort guest_CS;        /* 288 */
       UShort guest_DS;
       UShort guest_ES;
       UShort guest_FS;
       UShort guest_GS;
-      UShort guest_SS;
+      UShort guest_SS;        /* 298 */
+      /* At this point the offsets in 64-bit hosts get out of sync
+	 with the x86-32 ones: even though all the member sizes are
+	 the same, a ULong requires 8-byte alignment on AMD64, versus
+	 only 4 on x86-32. */
       /* LDT/GDT stuff. */
-      ULong  guest_LDT; /* host addr, a VexGuestX86SegDescr* */
-      ULong  guest_GDT; /* host addr, a VexGuestX86SegDescr* */
+      ULong  guest_LDT; /* host addr, a VexGuestX86SegDescr* */ /* 300 */
+      ULong  guest_GDT; /* host addr, a VexGuestX86SegDescr* */ /* 308 */
 
       /* Emulation notes */
-      UInt   guest_EMNOTE;
+      UInt   guest_EMNOTE;    /* 316 */
 
       /* For clflush/clinval: record start and length of area */
       UInt guest_CMSTART;
@@ -219,12 +223,20 @@ typedef
          EIP at the last syscall insn (int 0x80/81/82, sysenter,
          syscall).  Used when backing up to restart a syscall that has
          been interrupted by a signal. */
-      UInt guest_IP_AT_SYSCALL;
+      UInt guest_IP_AT_SYSCALL; /* 336 */
 
       /* Padding to make it have an 16-aligned size */
-      UInt padding1;
+      UInt padding1;            /* 340 */
       UInt padding2;
-      UInt padding3;
+      UInt padding3;            /* 348 */
+      /* Total size on x86 is 352 bytes = 22*16 */
+#if defined(__x86_64__)
+      /* On 64-bit host platforms, add extra padding to go with the
+	 alignment padding before guest_LDT. */
+      UInt padding4;
+      UInt padding5;
+      UInt padding6;
+#endif
    }
    VexGuestX86State;
 
