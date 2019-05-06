@@ -898,8 +898,8 @@ PRE(sys_clone)
       break;
 
    case VKI_CLONE_VFORK | VKI_CLONE_VM: /* vfork */
-      // FALLTHROUGH - assume vfork (somewhat) == fork, see ML_(do_fork_clone).
       cloneflags &= ~VKI_CLONE_VM;
+      // FALLTHROUGH - assume vfork (somewhat) == fork, see ML_(do_fork_clone).
 
    case 0: /* plain fork */
       SET_STATUS_from_SysRes(
@@ -3673,7 +3673,7 @@ PRE(sys_statx)
 {
    FUSE_COMPATIBLE_MAY_BLOCK();
    PRINT("sys_statx ( %ld, %#" FMT_REGWORD "x(%s), %ld, %ld, %#" FMT_REGWORD "x )",
-         ARG1,ARG2,(char*)(Addr)ARG2,ARG3,ARG4,ARG5);
+         (Word)ARG1,ARG2,(char*)(Addr)ARG2,(Word)ARG3,(Word)ARG4,ARG5);
    PRE_REG_READ5(long, "statx",
                  int, dirfd, char *, file_name, int, flags,
                  unsigned int, mask, struct statx *, buf);
@@ -5303,8 +5303,25 @@ PRE(sys_utimensat)
                  int, dfd, char *, filename, struct timespec *, utimes, int, flags);
    if (ARG2 != 0)
       PRE_MEM_RASCIIZ( "utimensat(filename)", ARG2 );
-   if (ARG3 != 0)
-      PRE_MEM_READ( "utimensat(tvp)", ARG3, 2 * sizeof(struct vki_timespec) );
+   if (ARG3 != 0) {
+      /* If timespec.tv_nsec has the special value UTIME_NOW or UTIME_OMIT
+         then the tv_sec field is ignored.  */
+      struct vki_timespec *times = (struct vki_timespec *)(Addr)ARG3;
+      PRE_MEM_READ( "utimensat(times[0].tv_nsec)",
+                    (Addr)&times[0].tv_nsec, sizeof(times[0].tv_nsec));
+      PRE_MEM_READ( "utimensat(times[1].tv_nsec)",
+                    (Addr)&times[1].tv_nsec, sizeof(times[1].tv_nsec));
+      if (ML_(safe_to_deref)(times, 2 * sizeof(struct vki_timespec))) {
+         if (times[0].tv_nsec != VKI_UTIME_NOW
+             && times[0].tv_nsec != VKI_UTIME_OMIT)
+            PRE_MEM_READ( "utimensat(times[0].tv_sec)",
+                          (Addr)&times[0].tv_sec, sizeof(times[0].tv_sec));
+         if (times[1].tv_nsec != VKI_UTIME_NOW
+             && times[1].tv_nsec != VKI_UTIME_OMIT)
+            PRE_MEM_READ( "utimensat(times[1].tv_sec)",
+                          (Addr)&times[1].tv_sec, sizeof(times[1].tv_sec));
+      }
+   }
 }
 
 PRE(sys_newfstatat)
@@ -11652,7 +11669,7 @@ PRE(sys_bpf)
    UInt res, key_size, value_size;
 
    PRINT("sys_bpf ( %ld, %#" FMT_REGWORD "x, %" FMT_REGWORD "u )",
-         ARG1, ARG2, ARG3);
+         (Word)ARG1, ARG2, ARG3);
    PRE_REG_READ3(long, "bpf",
                  int, cmd, union vki_bpf_attr *, attr, unsigned int, size);
    switch (ARG1) {
@@ -11943,6 +11960,7 @@ PRE(sys_bpf)
                PRE_MEM_WRITE("bpf(attr->btf_log_buf)",
                              attr->btf_log_buf, attr->btf_log_size);
          }
+         break;
       case VKI_BPF_TASK_FD_QUERY:
          /* Get info about the task. Write collected info. */
          PRE_MEM_READ("bpf(attr->task_fd_query.pid)", (Addr)&attr->task_fd_query.pid, sizeof(attr->task_fd_query.pid));
@@ -12074,6 +12092,36 @@ POST(sys_bpf)
          break;
    }
 }
+
+PRE(sys_copy_file_range)
+{
+  PRINT("sys_copy_file_range (%lu, %lu, %lu, %lu, %lu, %lu)", ARG1, ARG2, ARG3,
+        ARG4, ARG5, ARG6);
+
+  PRE_REG_READ6(vki_size_t, "copy_file_range",
+                int, "fd_in",
+                vki_loff_t *, "off_in",
+                int, "fd_out",
+                vki_loff_t *, "off_out",
+                vki_size_t, "len",
+                unsigned int, "flags");
+
+  /* File descriptors are "specially" tracked by valgrind.
+     valgrind itself uses some, so make sure someone didn't
+     put in one of our own...  */
+  if (!ML_(fd_allowed)(ARG1, "copy_file_range(fd_in)", tid, False) ||
+      !ML_(fd_allowed)(ARG3, "copy_file_range(fd_in)", tid, False)) {
+     SET_STATUS_Failure( VKI_EBADF );
+  } else {
+     /* Now see if the offsets are defined. PRE_MEM_READ will
+        double check it can dereference them. */
+     if (ARG2 != 0)
+        PRE_MEM_READ( "copy_file_range(off_in)", ARG2, sizeof(vki_loff_t));
+     if (ARG4 != 0)
+        PRE_MEM_READ( "copy_file_range(off_out)", ARG4, sizeof(vki_loff_t));
+  }
+}
+
 
 #undef PRE
 #undef POST

@@ -1,20 +1,22 @@
 
-AUTOMAKE_OPTIONS = foreign 1.10 dist-bzip2
+AUTOMAKE_OPTIONS = 1.10
 
 include $(top_srcdir)/Makefile.all.am 
 
-TOOLS =		memcheck \
+TOOLS = \
+		memcheck \
 		cachegrind \
 		callgrind \
-		massif \
-		lackey \
-		none \
 		helgrind \
-		drd
+		drd \
+		massif \
+		dhat \
+		lackey \
+		none
 
-EXP_TOOLS = 	exp-sgcheck \
-		exp-bbv \
-		exp-dhat
+EXP_TOOLS = \
+		exp-sgcheck \
+		exp-bbv
 
 # Put docs last because building the HTML is slow and we want to get
 # everything else working before we try it.
@@ -47,7 +49,7 @@ SUPP_FILES = \
 	darwin9.supp darwin9-drd.supp \
 	darwin10.supp darwin10-drd.supp \
 	darwin11.supp darwin12.supp darwin13.supp darwin14.supp darwin15.supp \
-	darwin16.supp \
+	darwin16.supp darwin17.supp \
 	bionic.supp \
 	solaris11.supp solaris12.supp
 DEFAULT_SUPP_FILES = @DEFAULT_SUPP@
@@ -102,6 +104,7 @@ perf: check
 EXTRA_DIST = \
 	COPYING.DOCS \
 	README_DEVELOPERS \
+	README_DEVELOPERS_processes \
 	README_PACKAGERS \
 	README_MISSING_SYSCALL_OR_IOCTL \
 	README.s390 \

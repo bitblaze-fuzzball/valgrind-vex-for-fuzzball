@@ -12,13 +12,15 @@ INSN_TESTS = clc clcle cvb cvd icm lpr tcxb lam_stam xc mvst add sub mul \
              rounding-1 rounding-2 rounding-3 rounding-4 rounding-5 bfp-1 \
              bfp-2 bfp-3 bfp-4 srnm srnmb comp-1 comp-2 exrl tmll tm stmg \
 	     ex clst mvc test_fork test_sig rounding-6 rxsbg popcnt \
-	     high-word \
+	     high-word traps \
 	     spechelper-alr spechelper-algr \
 	     spechelper-slr spechelper-slgr \
 	     spechelper-cr  spechelper-clr  \
 	     spechelper-ltr spechelper-or   \
 	     spechelper-icm-1  spechelper-icm-2 spechelper-tmll \
-	     spechelper-tm laa vector lsc2 ppno
+	     spechelper-tm laa vector lsc2 ppno vector_string vector_integer \
+	     vector_float
+
 if BUILD_DFP_TESTS
   INSN_TESTS += dfp-1 dfp-2 dfp-3 dfp-4 dfptest dfpext dfpconv srnmt pfpo
 endif
@@ -29,6 +31,8 @@ endif
 check_PROGRAMS = $(INSN_TESTS) \
 		 allexec \
 		 op00
+
+noinst_HEADERS = vector.h
 
 EXTRA_DIST = \
 	$(addsuffix .stderr.exp,$(INSN_TESTS)) \
@@ -66,3 +70,6 @@ fpext_CFLAGS     = $(AM_CFLAGS) @FLAG_MLONG_DOUBLE_128@
 ex_clone_LDADD   = -lpthread
 vector_CFLAGS    = $(AM_CFLAGS) -march=z13
 lsc2_CFLAGS       = -march=z13 -DS390_TESTS_NOCOLOR
+vector_string_CFLAGS = $(AM_CFLAGS) -march=z13 -DS390_TEST_COUNT=5
+vector_integer_CFLAGS    = $(AM_CFLAGS) -march=z13 -DS390_TEST_COUNT=4
+vector_float_CFLAGS    = $(AM_CFLAGS) -march=z13 -DS390_TEST_COUNT=4

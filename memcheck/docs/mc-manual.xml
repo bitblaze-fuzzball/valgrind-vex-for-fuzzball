@@ -888,9 +888,11 @@ is <option>--errors-for-leak-kinds=definite,possible</option>
     <listitem>
       <para>If set to yes, the results for the leak search done at exit will be
         output in a 'Callgrind Format' execution tree file. Note that this
-        automatically sets the option <option>--leak-check=full</option>.
-        The produced file
-       will contain the following events:</para>
+        automatically sets the options <option>--leak-check=full</option>
+        and <option>--show-leak-kinds=all</option>, to allow
+        xtree visualisation tools such as kcachegrind to select what kind
+        to leak to visualise.
+        The produced file will contain the following events:</para>
       <itemizedlist>
         <listitem><para><option>RB</option> : Reachable Bytes</para></listitem> 
          <listitem><para><option>PB</option> : Possibly lost Bytes</para></listitem>
@@ -1567,6 +1569,22 @@ is necessary.  This allows GCC to copy
 <varname>s1</varname> into <varname>s2</varname> any way it likes, and a
 warning will only be emitted if the uninitialised values are later
 used.</para>
+
+<para>As explained above, Memcheck maintains 8 V bits for each byte in your
+process, including for bytes that are in shared memory.  However, the same piece
+of shared memory can be mapped multiple times, by several processes or even by
+the same process (for example, if the process wants a read-only and a read-write
+mapping of the same page).  For such multiple mappings, Memcheck tracks the V
+bits for each mapping independently. This can lead to false positive errors, as
+the shared memory can be initialised via a first mapping, and accessed via
+another mapping.  The access via this other mapping will have its own V bits,
+which have not been changed when the memory was initialised via the first
+mapping.  The bypass for these false positives is to use Memcheck's client
+requests <varname>VALGRIND_MAKE_MEM_DEFINED</varname> and
+<varname>VALGRIND_MAKE_MEM_UNDEFINED</varname> to inform
+Memcheck about what your program does (or what another process does)
+to these shared memory mappings.
+</para>
 
 </sect2>
 

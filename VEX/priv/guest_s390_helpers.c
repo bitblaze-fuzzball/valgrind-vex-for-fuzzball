@@ -1210,23 +1210,6 @@ decode_bfp_rounding_mode(UInt irrm)
    psw >> 28;   /* cc */ \
 })
 
-/* This macro believes that arguments' addresses are in GPR1 and GPR2.
-   We use %%v16, %%v17 and %%v18 to avoid side effects in FPRs.
-*/
-#define S390_CC_FOR_V128_BINOP(insn) \
-({ \
-   /* VL(v1, x2, b2, d2, rxb) */ \
-   __asm__ volatile ( \
-        VL(1, 0, 1, 000, 8) \
-        VL(2, 0, 2, 000, 8) \
-        insn \
-        "ipm %[psw]\n\t" \
-           : [psw] "=d"(psw) \
-           : "d"(arg1), "d"(arg2) \
-           : "cc", "v16", "v17", "v18"); \
-   psw >> 28;   /* cc */ \
-})
-
 /* Convert an IRRoundingMode value to s390_dfp_round_t */
 #if defined(VGA_s390x)
 static s390_dfp_round_t
@@ -1935,6 +1918,14 @@ guest_s390x_spechelper(const HChar *function_name, IRExpr **args,
             return unop(Iop_1Uto32, binop(Iop_CmpNE64, cc_dep1, cc_dep2));
          }
          if (cond == 4 || cond == 4 + 1) {
+            if (isC64_exactly(cc_dep2, 0)) {
+               /*     dep1 <signed 0
+                  --> m.s.bit of dep1 == 1 */
+               return unop(Iop_64to32,
+                           binop(Iop_And64,
+                                 binop(Iop_Shr64, cc_dep1, mkU8(63)),
+                                 mkU64(1)));
+            }
             return unop(Iop_1Uto32, binop(Iop_CmpLT64S, cc_dep1, cc_dep2));
          }
          if (cond == 8 + 4 || cond == 8 + 4 + 1) {
@@ -2480,48 +2471,203 @@ missed:
 
 #if defined(VGA_s390x)
 ULong
-s390x_dirtyhelper_vec_binop(VexGuestS390XState *guest_state, ULong opcode,
-                            ULong v1, ULong v2)
+s390x_dirtyhelper_vec_op(VexGuestS390XState *guest_state,
+                         const ULong serialized)
 {
    UInt psw;
-   UInt elem_size = s390x_cc_vec_get_elem_size(opcode);
-   UInt op = s390x_cc_vec_get_op(opcode);
-   /* S390_CC_FOR_V128_BINOP relies on exatly this GPRs numbers and names. */
-   register ULong arg1 asm("1") = (ULong) &((&guest_state->guest_v0)[v1]);
-   register ULong arg2 asm("2") = (ULong) &((&guest_state->guest_v0)[v2]);
+   s390x_vec_op_details_t details;
+   const s390x_vec_op_details_t* d = (const s390x_vec_op_details_t*) &details;
 
-   switch(op) {
-   case S390_CC_VEC_VPKS:
-      /* VPKS(v1, v2, v3, m4, m5, rxb) */
-      switch(elem_size) {
-      case 1: return S390_CC_FOR_V128_BINOP(VPKS(3, 1, 2, 1, 1, e));
-      case 2: return S390_CC_FOR_V128_BINOP(VPKS(3, 1, 2, 2, 1, e));
-      case 3: return S390_CC_FOR_V128_BINOP(VPKS(3, 1, 2, 3, 1, e));
-      default: vassert(0);
-      }
+   details.serialized = serialized;
 
-   case S390_CC_VEC_VPKLS:
-      /* VPKLS(v1, v2, v3, m4, m5, rxb) */
-      switch(elem_size) {
-      case 1: return S390_CC_FOR_V128_BINOP(VPKLS(3, 1, 2, 1, 1, e));
-      case 2: return S390_CC_FOR_V128_BINOP(VPKLS(3, 1, 2, 2, 1, e));
-      case 3: return S390_CC_FOR_V128_BINOP(VPKLS(3, 1, 2, 3, 1, e));
-      default: vassert(0);
-      }
+   vassert(d->op > S390_VEC_OP_INVALID && d->op < S390_VEC_OP_LAST);
+   static const UChar opcodes[][2] = {
+      {0x00, 0x00}, /* invalid */
+      {0xe7, 0x97}, /* VPKS */
+      {0xe7, 0x95}, /* VPKLS */
+      {0xe7, 0x82}, /* VFAE */
+      {0xe7, 0x80}, /* VFEE */
+      {0xe7, 0x81}, /* VFENE */
+      {0xe7, 0x5c}, /* VISTR */
+      {0xe7, 0x8a}, /* VSTRC */
+      {0xe7, 0xf8}, /* VCEQ */
+      {0xe7, 0xd8}, /* VTM */
+      {0xe7, 0xb4}, /* VGFM */
+      {0xe7, 0xbc}, /* VGFMA */
+      {0xe7, 0xab}, /* VMAH */
+      {0xe7, 0xa9}, /* VMALH */
+      {0xe7, 0xfb}, /* VCH */
+      {0xe7, 0xf9}, /* VCHL */
+      {0xe7, 0xe8}, /* VFCE */
+      {0xe7, 0xeb}, /* VFCH */
+      {0xe7, 0xea}, /* VFCHE */
+      {0xe7, 0x4a}  /* VFTCI */
+   };
+
+   union {
+      struct {
+        unsigned int op1 : 8;
+        unsigned int v1  : 4;
+        unsigned int v2  : 4;
+        unsigned int v3  : 4;
+        unsigned int     : 4;
+        unsigned int m5  : 4;
+        unsigned int     : 4;
+        unsigned int m4  : 4;
+        unsigned int rxb : 4;
+        unsigned int op2 : 8;
+      } VRR;
+      struct {
+        unsigned int op1 : 8;
+        unsigned int v1  : 4;
+        unsigned int v2  : 4;
+        unsigned int v3  : 4;
+        unsigned int m5  : 4;
+        unsigned int m6  : 4;
+        unsigned int     : 4;
+        unsigned int v4  : 4;
+        unsigned int rxb : 4;
+        unsigned int op2 : 8;
+      } VRRd;
+      struct {
+         UInt op1 : 8;
+         UInt v1  : 4;
+         UInt v2  : 4;
+         UInt v3  : 4;
+         UInt     : 4;
+         UInt m6  : 4;
+         UInt m5  : 4;
+         UInt m4  : 4;
+         UInt rxb : 4;
+         UInt op2 : 8;
+      } VRRc;
+      struct {
+         UInt op1 : 8;
+         UInt v1  : 4;
+         UInt v2  : 4;
+         UInt i3  : 12;
+         UInt m5  : 4;
+         UInt m4  : 4;
+         UInt rxb : 4;
+         UInt op2 : 8;
+      } VRIe;
+      UChar bytes[6];
+   } the_insn;
+
+   the_insn.VRR.op1 = opcodes[d->op][0];
+   the_insn.bytes[1] = the_insn.bytes[2]
+      = the_insn.bytes[3] = the_insn.bytes[4] = 0;
+   the_insn.VRR.op2 = opcodes[d->op][1];
+
+   switch(d->op) {
+   case S390_VEC_OP_VISTR:
+      the_insn.VRR.v1 = 1;
+      the_insn.VRR.v2 = 2;
+      the_insn.VRR.rxb = 0b1100;
+      the_insn.VRR.m4 = d->m4;
+      the_insn.VRR.m5 = d->m5;
+      break;
+
+   case S390_VEC_OP_VTM:
+      the_insn.VRR.v1 = 2;
+      the_insn.VRR.v2 = 3;
+      the_insn.VRR.rxb = 0b1100;
+      break;
+
+   case S390_VEC_OP_VPKS:
+   case S390_VEC_OP_VPKLS:
+   case S390_VEC_OP_VFAE:
+   case S390_VEC_OP_VFEE:
+   case S390_VEC_OP_VFENE:
+   case S390_VEC_OP_VCEQ:
+   case S390_VEC_OP_VGFM:
+   case S390_VEC_OP_VCH:
+   case S390_VEC_OP_VCHL:
+      the_insn.VRR.v1 = 1;
+      the_insn.VRR.v2 = 2;
+      the_insn.VRR.v3 = 3;
+      the_insn.VRR.rxb = 0b1110;
+      the_insn.VRR.m4 = d->m4;
+      the_insn.VRR.m5 = d->m5;
+      break;
+
+   case S390_VEC_OP_VSTRC:
+   case S390_VEC_OP_VGFMA:
+   case S390_VEC_OP_VMAH:
+   case S390_VEC_OP_VMALH:
+      the_insn.VRRd.v1 = 1;
+      the_insn.VRRd.v2 = 2;
+      the_insn.VRRd.v3 = 3;
+      the_insn.VRRd.v4 = 4;
+      the_insn.VRRd.rxb = 0b1111;
+      the_insn.VRRd.m5 = d->m4;
+      the_insn.VRRd.m6 = d->m5;
+      break;
+
+   case S390_VEC_OP_VFCE:
+   case S390_VEC_OP_VFCH:
+   case S390_VEC_OP_VFCHE:
+      the_insn.VRRc.v1 = 1;
+      the_insn.VRRc.v2 = 2;
+      the_insn.VRRc.v3 = 3;
+      the_insn.VRRc.rxb = 0b1110;
+      the_insn.VRRc.m4 = d->m4;
+      the_insn.VRRc.m5 = d->m5;
+      the_insn.VRRc.m6 = d->m6;
+      break;
+
+   case S390_VEC_OP_VFTCI:
+      the_insn.VRIe.v1 = 1;
+      the_insn.VRIe.v2 = 2;
+      the_insn.VRIe.rxb = 0b1100;
+      the_insn.VRIe.i3 = d->i3;
+      the_insn.VRIe.m4 = d->m4;
+      the_insn.VRIe.m5 = d->m5;
+      break;
 
    default:
-      vex_printf("operation = %d\n", op);
-      vpanic("s390x_dirtyhelper_vec_binop: unknown operation");
+      vex_printf("operation = %d\n", d->op);
+      vpanic("s390x_dirtyhelper_vec_op: unknown operation");
    }
 
-   return 0;
+   const V128* guest_v = &(guest_state->guest_v0);
+   __asm__ volatile (
+      "lgr %%r10, %[arg1]\n"
+      VL(2, 0, a, 000, 8)
+      "lgr %%r10, %[arg2]\n"
+      VL(3, 0, a, 000, 8)
+      "lgr %%r10, %[arg3]\n"
+      VL(4, 0, a, 000, 8)
+      "ex %[zero], %[insn]\n"
+
+      "cijne %[read_only], 0, return_cc\n"
+      "lgr %%r10, %[res]\n"
+      VST(1, 0, a, 000, 8)
+
+      "return_cc: "
+      "ipm %[psw]\n\t"
+         : [psw] "=d" (psw)
+
+         : [res]  "r" (&guest_v[d->v1]),
+           [arg1] "r" (&guest_v[d->v2]),
+           [arg2] "r" (&guest_v[d->v3]),
+           [arg3] "r" (&guest_v[d->v4]),
+
+           [zero] "r" (0ULL),
+           [insn] "m" (the_insn),
+           [read_only] "r" (d->read_only)
+
+         : "cc", "r10", "v16", "v17", "v18", "v19"
+      );
+
+   return psw >> 28;   /* cc */
 }
 
 #else
 
 ULong
-s390x_dirtyhelper_vec_binop(VexGuestS390XState *guest_state, ULong opcode,
-                            ULong v1, ULong v2)
+s390x_dirtyhelper_vec_op(VexGuestS390XState *guest_state,
+                         const ULong serialized)
 { return 0; }
 
 #endif

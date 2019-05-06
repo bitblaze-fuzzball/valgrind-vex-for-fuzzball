@@ -34,6 +34,7 @@
 #include "pub_core_vki.h"
 #include "pub_core_threadstate.h"
 #include "pub_core_debuginfo.h"  /* self */
+#include "pub_core_debuglog.h"
 #include "pub_core_demangle.h"
 #include "pub_core_libcbase.h"
 #include "pub_core_libcassert.h"
@@ -67,10 +68,6 @@
 # include "priv_readpdb.h"
 #endif
 
-
-/* Set this to 1 to enable debug printing for the
-   should-we-load-debuginfo-now? finite state machine. */
-#define DEBUG_FSM 0
 
 /* Set this to 1 to enable somewhat minimal debug printing for the
    debuginfo-epoch machinery. */
@@ -443,27 +440,31 @@ static void free_DebugInfo ( DebugInfo* di )
 */
 static void discard_or_archive_DebugInfo ( DebugInfo* di )
 {
-   const HChar* reason  = "munmap";
-   const Bool   archive = VG_(clo_keep_debuginfo);
+   /*  di->have_dinfo can be False when an object is mapped "ro"
+       and then unmapped before the debug info is loaded.
+       In other words, debugInfo_list might contain many di that have
+       no OS mappings, even if their fsm.maps still contain mappings.
+       Such (left over) mappings can overlap with real mappings.
+       Search for FSMMAPSNOTCLEANEDUP: below for more details. */
+   /* If a di has no dinfo, we can discard even if VG_(clo_keep_debuginfo). */
+   const Bool   archive = VG_(clo_keep_debuginfo) && di->have_dinfo;
 
    DebugInfo** prev_next_ptr = &debugInfo_list;
    DebugInfo*  curr          =  debugInfo_list;
 
-   /* It must be active! */
-   vg_assert(is_DebugInfo_active(di));
+   /* If di->have_dinfo, then it must be active! */
+   vg_assert(!di->have_dinfo || is_DebugInfo_active(di));
    while (curr) {
       if (curr == di) {
          /* Found it; (remove from list and free it), or archive it. */
-         if (curr->have_dinfo
-             && (VG_(clo_verbosity) > 1 || VG_(clo_trace_redir)))
-            VG_(message)(Vg_DebugMsg, 
-                         "%s syms at %#lx-%#lx in %s due to %s()\n",
-                         archive ? "Archiving" : "Discarding",
-                         di->text_avma, 
-                         di->text_avma + di->text_size,
-                         curr->fsm.filename ? curr->fsm.filename
-                                            : "???",
-                         reason);
+         if (VG_(clo_verbosity) > 1 || VG_(clo_trace_redir))
+            VG_(dmsg)("%s syms at %#lx-%#lx in %s (have_dinfo %d)\n",
+                      archive ? "Archiving" : "Discarding",
+                      di->text_avma, 
+                      di->text_avma + di->text_size,
+                      curr->fsm.filename ? curr->fsm.filename
+                                           : "???",
+                      curr->have_dinfo);
          vg_assert(*prev_next_ptr == curr);
          if (!archive) {
             *prev_next_ptr = curr->next;
@@ -659,6 +660,8 @@ static void check_CFSI_related_invariants ( const DebugInfo* di )
    DebugInfo* di2 = NULL;
    Bool has_nonempty_rx = False;
    Word i, j;
+   const Bool debug = VG_(debugLog_getLevel)() >= 3;
+
    vg_assert(di);
    /* This fn isn't called until after debuginfo for this object has
       been successfully read.  And that shouldn't happen until we have
@@ -675,7 +678,7 @@ static void check_CFSI_related_invariants ( const DebugInfo* di )
       if (map->size == 0)
          continue;
       has_nonempty_rx = True;
-        
+
       /* normal case: r-x section is nonempty */
       /* invariant (0) */
       vg_assert(map->size > 0);
@@ -688,8 +691,9 @@ static void check_CFSI_related_invariants ( const DebugInfo* di )
             const DebugInfoMapping* map2 = VG_(indexXA)(di2->fsm.maps, j);
             if (!map2->rx || map2->size == 0)
                continue;
-            vg_assert(!ranges_overlap(map->avma,  map->size,
-                                      map2->avma, map2->size));
+            vg_assert2(!ranges_overlap(map->avma,  map->size,
+                                       map2->avma, map2->size),
+                       "DiCfsi invariant (1) verification failed");
          }
       }
       di2 = NULL;
@@ -722,17 +726,44 @@ static void check_CFSI_related_invariants ( const DebugInfo* di )
          if (map->size > 0)
             VG_(bindRangeMap)(rm, map->avma, map->avma + map->size - 1, 0);
       }
-      /* If the map isn't now empty, it means the cfsi range isn't covered
-         entirely by the rx mappings. */
-      Bool cfsi_fits = VG_(sizeRangeMap)(rm) == 1;
-      if (cfsi_fits) {
-         // Sanity-check the range-map operation
+      /* Typically, the range map contains one single range with value 0,
+         meaning that the cfsi range is entirely covered by the rx mappings.
+         However, in some cases, there are holes in the rx mappings
+         (see BZ #398028).
+         In such a case, check that no cfsi refers to these holes.  */
+      Bool cfsi_fits = VG_(sizeRangeMap)(rm) >= 1;
+      // Check the ranges in the map.
+      for (Word ix = 0; ix < VG_(sizeRangeMap)(rm); ix++) {
          UWord key_min = 0x55, key_max = 0x56, val = 0x57;
-         /* We can look up any address at all since we expect only one range */
-         VG_(lookupRangeMap)(&key_min, &key_max, &val, rm, 0x1234);
-         vg_assert(key_min == (UWord)0);
-         vg_assert(key_max == ~(UWord)0);
-         vg_assert(val == 0);
+         VG_(indexRangeMap)(&key_min, &key_max, &val, rm, ix);
+         if (debug)
+            VG_(dmsg)("cfsi range rx-mappings coverage check: %s %#lx-%#lx\n",
+                      val == 1 ? "Uncovered" : "Covered",
+                      key_min, key_max);
+         {
+            // Sanity-check the range-map operation
+            UWord check_key_min = 0x55, check_key_max = 0x56, check_val = 0x57;
+            VG_(lookupRangeMap)(&check_key_min, &check_key_max, &check_val, rm,
+                                key_min + (key_max - key_min) / 2);
+            if (ix == 0)
+               vg_assert(key_min == (UWord)0);
+            if (ix == VG_(sizeRangeMap)(rm) - 1)
+               vg_assert(key_max == ~(UWord)0);
+            vg_assert(key_min == check_key_min);
+            vg_assert(key_max == check_key_max);
+            vg_assert(val == 0 || val == 1);
+            vg_assert(val == check_val);
+         }
+         if (val == 1) {
+            /* This is a part of cfsi_minavma .. cfsi_maxavma not covered.
+               Check no cfsi overlaps with this range. */
+            for (i = 0; i < di->cfsi_used; i++) {
+               DiCfSI* cfsi = &di->cfsi_rd[i];
+               vg_assert2(cfsi->base > key_max
+                          || cfsi->base + cfsi->len - 1 < key_min,
+                          "DiCfsi invariant (2) verification failed");
+            }
+         }
       }
       vg_assert(cfsi_fits);
 
@@ -1021,7 +1052,7 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
    Int        actual_fd, oflags;
    SysRes     preadres;
    HChar      buf1k[1024];
-   Bool       debug = (DEBUG_FSM != 0);
+   const Bool       debug = VG_(debugLog_getLevel)() >= 3;
    SysRes     statres;
    struct vg_stat statbuf;
 
@@ -1034,11 +1065,11 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
    vg_assert(seg);
 
    if (debug) {
-      VG_(printf)("di_notify_mmap-0:\n");
-      VG_(printf)("di_notify_mmap-1: %#lx-%#lx %c%c%c\n",
-                  seg->start, seg->end, 
-                  seg->hasR ? 'r' : '-',
-                  seg->hasW ? 'w' : '-',seg->hasX ? 'x' : '-' );
+      VG_(dmsg)("di_notify_mmap-0:\n");
+      VG_(dmsg)("di_notify_mmap-1: %#lx-%#lx %c%c%c\n",
+                seg->start, seg->end, 
+                seg->hasR ? 'r' : '-',
+                seg->hasW ? 'w' : '-',seg->hasX ? 'x' : '-' );
    }
 
    /* guaranteed by aspacemgr-linux.c, sane_NSegment() */
@@ -1064,7 +1095,7 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
       return 0;
 
    if (debug)
-      VG_(printf)("di_notify_mmap-2: %s\n", filename);
+      VG_(dmsg)("di_notify_mmap-2: %s\n", filename);
 
    /* Only try to read debug information from regular files.  */
    statres = VG_(stat)(filename, &statbuf);
@@ -1167,9 +1198,9 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
 #  endif
 
    if (debug)
-      VG_(printf)("di_notify_mmap-3: "
-                  "is_rx_map %d, is_rw_map %d, is_ro_map %d\n",
-                  (Int)is_rx_map, (Int)is_rw_map, (Int)is_ro_map);
+      VG_(dmsg)("di_notify_mmap-3: "
+                "is_rx_map %d, is_rw_map %d, is_ro_map %d\n",
+                (Int)is_rx_map, (Int)is_rw_map, (Int)is_ro_map);
 
    /* Ignore mappings with permissions we can't possibly be interested in. */
    if (!(is_rx_map || is_rw_map || is_ro_map))
@@ -1253,15 +1284,15 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
       mjw/thh.  */
    if (di->have_dinfo) {
       if (debug)
-         VG_(printf)("di_notify_mmap-4x: "
-                     "ignoring mapping because we already read debuginfo "
-                     "for DebugInfo* %p\n", di);
+         VG_(dmsg)("di_notify_mmap-4x: "
+                   "ignoring mapping because we already read debuginfo "
+                   "for DebugInfo* %p\n", di);
       return 0;
    }
 
    if (debug)
-      VG_(printf)("di_notify_mmap-4: "
-                  "noting details in DebugInfo* at %p\n", di);
+      VG_(dmsg)("di_notify_mmap-4: "
+                "noting details in DebugInfo* at %p\n", di);
 
    /* Note the details about the mapping. */
    DebugInfoMapping map;
@@ -1285,13 +1316,14 @@ ULong VG_(di_notify_mmap)( Addr a, Bool allow_SkFileV, Int use_fd )
          already read debuginfo for this object.  So let's do so now.
          Yee-ha! */
       if (debug)
-         VG_(printf)("di_notify_mmap-5: "
-                     "achieved accept state for %s\n", filename);
+         VG_(dmsg)("di_notify_mmap-5: "
+                   "achieved accept state for %s\n", filename);
       return di_notify_ACHIEVE_ACCEPT_STATE ( di );
    } else {
-      /* If we don't have an rx and rw mapping, or if we already have
-         debuginfo for this mapping for whatever reason, go no
-         further. */
+      /* If we don't have an rx and rw mapping, go no further. */
+      if (debug)
+         VG_(dmsg)("di_notify_mmap-6: "
+                   "no dinfo loaded %s (no rx or no rw mapping)\n", filename);
       return 0;
    }
 }
@@ -1336,16 +1368,16 @@ void VG_(di_notify_mprotect)( Addr a, SizeT len, UInt prot )
    declaration of struct _DebugInfoFSM for details. */
 void VG_(di_notify_vm_protect)( Addr a, SizeT len, UInt prot )
 {
-   Bool debug = (DEBUG_FSM != 0);
+   const Bool debug = VG_(debugLog_getLevel)() >= 3;
 
    Bool r_ok = toBool(prot & VKI_PROT_READ);
    Bool w_ok = toBool(prot & VKI_PROT_WRITE);
    Bool x_ok = toBool(prot & VKI_PROT_EXEC);
    if (debug) {
-      VG_(printf)("di_notify_vm_protect-0:\n");
-      VG_(printf)("di_notify_vm_protect-1: %#lx-%#lx %c%c%c\n",
-                  a, a + len - 1,
-                  r_ok ? 'r' : '-', w_ok ? 'w' : '-', x_ok ? 'x' : '-' );
+      VG_(dmsg)("di_notify_vm_protect-0:\n");
+      VG_(dmsg)("di_notify_vm_protect-1: %#lx-%#lx %c%c%c\n",
+                a, a + len - 1,
+                r_ok ? 'r' : '-', w_ok ? 'w' : '-', x_ok ? 'x' : '-' );
    }
 
    Bool do_nothing = True;
@@ -1354,8 +1386,8 @@ void VG_(di_notify_vm_protect)( Addr a, SizeT len, UInt prot )
 #  endif
    if (do_nothing /* wrong platform */) {
       if (debug)
-         VG_(printf)("di_notify_vm_protect-2: wrong platform, "
-                     "doing nothing.\n");
+         VG_(dmsg)("di_notify_vm_protect-2: wrong platform, "
+                   "doing nothing.\n");
       return;
    }
 
@@ -1367,7 +1399,7 @@ void VG_(di_notify_vm_protect)( Addr a, SizeT len, UInt prot )
       is found, conclude we're in an accept state and read debuginfo
       accordingly. */
    if (debug)
-      VG_(printf)("di_notify_vm_protect-3: looking for existing DebugInfo*\n");
+      VG_(dmsg)("di_notify_vm_protect-3: looking for existing DebugInfo*\n");
    DebugInfo* di;
    DebugInfoMapping *map = NULL;
    Word i;
@@ -1397,8 +1429,8 @@ void VG_(di_notify_vm_protect)( Addr a, SizeT len, UInt prot )
       return; /* didn't find anything */
 
    if (debug)
-     VG_(printf)("di_notify_vm_protect-4: found existing DebugInfo* at %p\n",
-                 di);
+     VG_(dmsg)("di_notify_vm_protect-4: found existing DebugInfo* at %p\n",
+               di);
 
    /* Do the upgrade.  Simply update the flags of the mapping
       and pretend we never saw the RO map at all. */
@@ -1419,7 +1451,7 @@ void VG_(di_notify_vm_protect)( Addr a, SizeT len, UInt prot )
    /* Check if we're now in an accept state and read debuginfo.  Finally. */
    if (di->fsm.have_rx_map && di->fsm.have_rw_map && !di->have_dinfo) {
       if (debug)
-         VG_(printf)("di_notify_vm_protect-5: "
+         VG_(dmsg)("di_notify_vm_protect-5: "
                      "achieved accept state for %s\n", di->fsm.filename);
       ULong di_handle __attribute__((unused))
          = di_notify_ACHIEVE_ACCEPT_STATE( di );
@@ -3167,6 +3199,15 @@ Addr ML_(get_CFA) ( Addr ip, Addr sp, Addr fp,
      uregs.ia = ip;
      uregs.sp = sp;
      uregs.fp = fp;
+     /* JRS FIXME 3 Apr 2019: surely we can do better for f0..f7 */
+     uregs.f0 = 0;
+     uregs.f1 = 0;
+     uregs.f2 = 0;
+     uregs.f3 = 0;
+     uregs.f4 = 0;
+     uregs.f5 = 0;
+     uregs.f6 = 0;
+     uregs.f7 = 0;
      return compute_cfa(&uregs,
                         min_accessible,  max_accessible, ce->di, ce->cfsi_m);
    }
@@ -3227,6 +3268,8 @@ void VG_(ppUnwindInfo) (Addr from, Addr to)
    For arm, the unwound registers are: R7 R11 R12 R13 R14 R15.
 
    For arm64, the unwound registers are: X29(FP) X30(LR) SP PC.
+
+   For s390, the unwound registers are: R11(FP) R14(LR) R15(SP) F0..F7 PC.
 */
 Bool VG_(use_CF_info) ( /*MOD*/D3UnwindRegs* uregsHere,
                         Addr min_accessible,
@@ -3277,11 +3320,33 @@ Bool VG_(use_CF_info) ( /*MOD*/D3UnwindRegs* uregsHere,
    /* Now we know the CFA, use it to roll back the registers we're
       interested in. */
 
-#if defined(VGA_mips64) && defined(VGABI_N32)
-#define READ_REGISTER(addr) ML_(read_ULong)((addr))
-#else
-#define READ_REGISTER(addr) ML_(read_Addr)((addr))
-#endif
+#  if defined(VGA_mips64) && defined(VGABI_N32)
+#   define READ_REGISTER(addr) ML_(read_ULong)((addr))
+#  else
+#   define READ_REGISTER(addr) ML_(read_Addr)((addr))
+#  endif
+
+#  if defined(VGA_s390x)
+   const Bool is_s390x = True;
+   const Addr old_S390X_F0 = uregsHere->f0;
+   const Addr old_S390X_F1 = uregsHere->f1;
+   const Addr old_S390X_F2 = uregsHere->f2;
+   const Addr old_S390X_F3 = uregsHere->f3;
+   const Addr old_S390X_F4 = uregsHere->f4;
+   const Addr old_S390X_F5 = uregsHere->f5;
+   const Addr old_S390X_F6 = uregsHere->f6;
+   const Addr old_S390X_F7 = uregsHere->f7;
+#  else
+   const Bool is_s390x = False;
+   const Addr old_S390X_F0 = 0;
+   const Addr old_S390X_F1 = 0;
+   const Addr old_S390X_F2 = 0;
+   const Addr old_S390X_F3 = 0;
+   const Addr old_S390X_F4 = 0;
+   const Addr old_S390X_F5 = 0;
+   const Addr old_S390X_F6 = 0;
+   const Addr old_S390X_F7 = 0;
+#  endif
 
 #  define COMPUTE(_prev, _here, _how, _off)             \
       do {                                              \
@@ -3311,8 +3376,32 @@ Bool VG_(use_CF_info) ( /*MOD*/D3UnwindRegs* uregsHere,
                _prev = evalCfiExpr(di->cfsi_exprs, _off, &eec, &ok ); \
                if (!ok) return False;                   \
                break;                                   \
+            case CFIR_S390X_F0:                               \
+               if (is_s390x) { _prev = old_S390X_F0; break; } \
+               vg_assert(0+0-0);                              \
+            case CFIR_S390X_F1:                               \
+               if (is_s390x) { _prev = old_S390X_F1; break; } \
+               vg_assert(0+1-1);                              \
+            case CFIR_S390X_F2:                               \
+               if (is_s390x) { _prev = old_S390X_F2; break; } \
+               vg_assert(0+2-2);                              \
+            case CFIR_S390X_F3:                               \
+               if (is_s390x) { _prev = old_S390X_F3; break; } \
+               vg_assert(0+3-3);                              \
+            case CFIR_S390X_F4:                               \
+               if (is_s390x) { _prev = old_S390X_F4; break; } \
+               vg_assert(0+4-4);                              \
+            case CFIR_S390X_F5:                               \
+               if (is_s390x) { _prev = old_S390X_F5; break; } \
+               vg_assert(0+5-5);                              \
+            case CFIR_S390X_F6:                               \
+               if (is_s390x) { _prev = old_S390X_F6; break; } \
+               vg_assert(0+6-6);                              \
+            case CFIR_S390X_F7:                               \
+               if (is_s390x) { _prev = old_S390X_F7; break; } \
+               vg_assert(0+7-7);                              \
             default:                                    \
-               vg_assert(0);                            \
+               vg_assert(0*0);                          \
          }                                              \
       } while (0)
 
@@ -3331,6 +3420,14 @@ Bool VG_(use_CF_info) ( /*MOD*/D3UnwindRegs* uregsHere,
    COMPUTE(uregsPrev.ia, uregsHere->ia, cfsi_m->ra_how, cfsi_m->ra_off);
    COMPUTE(uregsPrev.sp, uregsHere->sp, cfsi_m->sp_how, cfsi_m->sp_off);
    COMPUTE(uregsPrev.fp, uregsHere->fp, cfsi_m->fp_how, cfsi_m->fp_off);
+   COMPUTE(uregsPrev.f0, uregsHere->f0, cfsi_m->f0_how, cfsi_m->f0_off);
+   COMPUTE(uregsPrev.f1, uregsHere->f1, cfsi_m->f1_how, cfsi_m->f1_off);
+   COMPUTE(uregsPrev.f2, uregsHere->f2, cfsi_m->f2_how, cfsi_m->f2_off);
+   COMPUTE(uregsPrev.f3, uregsHere->f3, cfsi_m->f3_how, cfsi_m->f3_off);
+   COMPUTE(uregsPrev.f4, uregsHere->f4, cfsi_m->f4_how, cfsi_m->f4_off);
+   COMPUTE(uregsPrev.f5, uregsHere->f5, cfsi_m->f5_how, cfsi_m->f5_off);
+   COMPUTE(uregsPrev.f6, uregsHere->f6, cfsi_m->f6_how, cfsi_m->f6_off);
+   COMPUTE(uregsPrev.f7, uregsHere->f7, cfsi_m->f7_how, cfsi_m->f7_off);
 #  elif defined(VGA_mips32) || defined(VGA_mips64)
    COMPUTE(uregsPrev.pc, uregsHere->pc, cfsi_m->ra_how, cfsi_m->ra_off);
    COMPUTE(uregsPrev.sp, uregsHere->sp, cfsi_m->sp_how, cfsi_m->sp_off);
@@ -3345,6 +3442,7 @@ Bool VG_(use_CF_info) ( /*MOD*/D3UnwindRegs* uregsHere,
 #    error "Unknown arch"
 #  endif
 
+#  undef READ_REGISTER
 #  undef COMPUTE
 
    *uregsHere = uregsPrev;
